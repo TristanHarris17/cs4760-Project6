@@ -32,6 +32,8 @@ struct MessageBuffer {
     long mtype;
     pid_t pid;
     int process_running; // 1 if running, 0 if not
+    int memory_location;
+    bool write; // true if write request, false if read request
 };
 
 // Globals
@@ -41,7 +43,7 @@ int shmid = shmget(sh_key, sizeof(int)*2, IPC_CREAT | 0666);
 int *shm_clock;
 int *sec;
 vector <PCB> table(MAX_PROCESSES);
-const int increment_amount = 10000;
+const int increment_amount = 100; // 100 nanoseconds per loop iteration
 
 // setup message queue
 key_t msg_key = ftok("oss.cpp", 1);
@@ -385,6 +387,7 @@ int main(int argc, char* argv[]) {
     MessageBuffer ackMessage;
 
     while (launched_processes < proc || running_processes > 0) {
+        // increment clock
         increment_clock(sec, nano, increment_amount);
 
         // Check if it's time to launch a new worker
@@ -440,19 +443,15 @@ int main(int argc, char* argv[]) {
                 running_processes--;
                 continue;
             }
-
-           // if (rcvMessage.request_or_release == 1) {
-
-            }   
-                // send message to worker acknowledging release
-                memset(&ackMessage, 0, sizeof(ackMessage));
-                ackMessage.mtype = rcvMessage.pid;
-                ackMessage.process_running = 1;
-                size_t ack_size = sizeof(MessageBuffer) - sizeof(long);
-                if (msgsnd(msgid, &ackMessage, ack_size, 0) == -1) {
-                    perror("oss msgsnd ack failed");
-                    exit_handler();
-                }
+  
+            // send message to worker acknowledging release
+            memset(&ackMessage, 0, sizeof(ackMessage));
+            ackMessage.mtype = rcvMessage.pid;
+            ackMessage.process_running = 1;
+            size_t ack_size = sizeof(MessageBuffer) - sizeof(long);
+            if (msgsnd(msgid, &ackMessage, ack_size, 0) == -1) {
+                perror("oss msgsnd ack failed");
+                exit_handler();
             }
 
         // call print_process_table every half-second of simulated time
@@ -463,6 +462,7 @@ int main(int argc, char* argv[]) {
                 next_print_total += PRINT_INTERVAL_NANO;
             }
         }
+    }
 
     // cleanup
      shmdt(shm_clock);

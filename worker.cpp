@@ -16,10 +16,29 @@ struct MessageBuffer {
     long mtype;
     pid_t pid;
     int process_running; // 1 if running, 0 if not
+    int memory_location;
+    bool write; // true if write request, false if read request
 };
 
 random_device rd;
 mt19937 gen(rd());
+
+int get_memory_location(){
+    uniform_int_distribution<> page(0, 16);
+    uniform_int_distribution<> offset(0, 1023);
+
+    int page_number = page(gen);
+    int offset_number = offset(gen);
+
+    return (page_number * 1024) + offset_number;
+}
+
+// 40% chance to write, 60% chance to read, write = true, read = false
+bool is_write(){ 
+    uniform_int_distribution<> write_dist(0, 100);
+    int roll = write_dist(gen);
+    return roll < 40; // 40% chance to write
+}
 
 int main(int argc, char* argv[]) {
     key_t sh_key = ftok("oss.cpp", 0);
@@ -61,7 +80,7 @@ int main(int argc, char* argv[]) {
         end_nano = end_nano % 1000000000;
     }
     
-        // Print starting message
+    // Print starting message
     cout << "Worker starting, " << "PID:" << getpid() << " PPID:" << getppid() << endl
          << "Called With:" << endl
          << "Interval: " << target_seconds << " seconds, " << target_nano << " nanoseconds" << endl;
@@ -97,6 +116,31 @@ int main(int argc, char* argv[]) {
             }
             break; // exit loop and terminate
         }
+
+        // determine memory location and read/write
+        int mem_location = get_memory_location();
+        bool write = is_write();
+
+        // send message to OSS with memory request
+        memset(&msg, 0, sizeof(msg));
+        msg.mtype = getppid();
+        msg.pid = getpid();
+        msg.process_running = 1; // indicate process is running
+        msg.memory_location = mem_location;
+        msg.write = write;
+        size_t msg_size = sizeof(MessageBuffer) - sizeof(long);
+        if (msgsnd(msgid, &msg, msg_size, 0) == -1) {
+            perror("worker msgsnd failed");
+            exit(1);
+        }
+
+        // wait for acknowledgment from OSS
+        ssize_t ret = msgrcv(msgid, &msg, msg_size, getpid(), 0);
+        if (ret == -1) {
+            perror("worker msgrcv failed");
+            exit(1);
+        }
+
     }
     shmdt(clock);
     return 0;
