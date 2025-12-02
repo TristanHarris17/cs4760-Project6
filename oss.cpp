@@ -20,12 +20,19 @@
 
 using namespace std;
 
+const int MAX_FRAMES = 64;
+const int PAGE_SIZE = 1024;
+const int TOTAL_PAGES = 16;
+
 struct PCB {
     bool occupied;
     pid_t pid;
     int start_sec;
     int start_nano;
     int pcb_index;
+    vector<int> page_table;
+
+    PCB() : page_table(TOTAL_PAGES, -1) {} // constructor to initialize page_table
 };
 
 struct MessageBuffer {
@@ -36,6 +43,13 @@ struct MessageBuffer {
     bool write; // true if write request, false if read request
 };
 
+struct Frame {
+    bool occupied;
+    pid_t pid;
+    int page_number;
+    bool dirty;
+};
+
 // Globals
 key_t sh_key = ftok("oss.cpp", 0);
 int MAX_PROCESSES = 18;
@@ -43,8 +57,9 @@ int shmid = shmget(sh_key, sizeof(int)*2, IPC_CREAT | 0666);
 int *shm_clock;
 int *sec;
 vector <PCB> table(MAX_PROCESSES);
+vector<Frame> frame_table(MAX_FRAMES);
 // TODO: adjust increment amount for final submission
-const int increment_amount = 1000000; // 1000000 nanoseconds per loop iteration
+const int increment_amount = 100000; // 100000 nanoseconds per loop iteration
 
 // setup message queue
 key_t msg_key = ftok("oss.cpp", 1);
@@ -149,7 +164,7 @@ int remove_pcb(vector<PCB> &table, pid_t pid) {
     return -1;
 }
 
-void print_process_table(const std::vector<PCB> &table, bool verbose) {
+void print_process_table(const std::vector<PCB> &table) {
     ostringstream ss;
     using std::endl;
     ss << std::left
@@ -178,6 +193,46 @@ void print_process_table(const std::vector<PCB> &table, bool verbose) {
 
 }
 
+void print_page_tables(const std::vector<PCB> &table) {
+    std::ostringstream ss;
+    using std::endl;
+    // Header
+    ss << std::left << std::setw(6)  << "Index"
+       << std::setw(6)  << "Occ"
+       << std::setw(10) << "PID";
+    for (int i = 0; i < 16; ++i) {
+        ss << std::setw(6) << (std::string("P") + std::to_string(i));
+    }
+    ss << endl;
+
+    // Divider
+    ss << std::string(6 + 6 + 10 + 16 * 6, '-') << endl;
+
+    // Rows
+    for (size_t i = 0; i < table.size(); ++i) {
+        const PCB &p = table[i];
+        ss << std::left << std::setw(6) << i
+           << std::setw(6) << (p.occupied ? 1 : 0);
+
+        if (p.occupied) {
+            ss << std::setw(10) << p.pid;
+            // Print 16 page entries (use '-' for -1 / not present)
+            for (int j = 0; j < 16; ++j) {
+                int val = (j < (int)p.page_table.size()) ? p.page_table[j] : -1;
+                if (val == -1) ss << std::setw(6) << "-";
+                else ss << std::setw(6) << val;
+            }
+        } else {
+            ss << std::setw(10) << "-";
+            for (int j = 0; j < 16; ++j) ss << std::setw(6) << "-";
+        }
+        ss << endl;
+    }
+
+    ss << endl;
+    oss_log_msg(ss.str());
+}
+
 void signal_handler(int sig) {
     if (sig == SIGALRM || sig == SIGINT) {
         cout << "Received SIGALRM or SIGINT, terminating all child processes..." << endl;
@@ -197,6 +252,10 @@ void exit_handler() {
     exit(1);
 }
 
+int get_page_number(int address) {
+    return address / PAGE_SIZE;
+}
+
 // helper to detect empty/blank optarg
 static inline bool optarg_blank(const char* s) {
     return (s == nullptr) || (s[0] == '\0');
@@ -208,7 +267,6 @@ int main(int argc, char* argv[]) {
     int simul = -1;
     float time_limit = -1;
     float launch_interval = -1;
-    bool verbose_mode = false;
     string log_file = "";
     int opt;
 
@@ -223,7 +281,6 @@ int main(int argc, char* argv[]) {
                     << "  -t time_limit     Time limit for each worker process in seconds (non-negative float)\n"
                     << "  -i launch_interval Interval between launching worker processes in seconds (non-negative float)\n"
                     << "  -f logfile        Log file name (optional)\n"
-                    << "  -v                Turn on verbose mode\n"
                     << "Example:\n"
                     << "  ./oss -n 10 -s 3 -t 2.5 -i 0.5 -f oss.log\n";
                 exit_handler();
@@ -296,10 +353,6 @@ int main(int argc, char* argv[]) {
                     exit_handler();
                 }
                  break;
-            }
-            case 'v': {
-                verbose_mode = true;
-                break;
             }
             default:
                 cerr << "Error: Unknown option or missing argument." << endl;
@@ -415,7 +468,7 @@ int main(int argc, char* argv[]) {
 
             // Update the next allowed launch time
             next_launch_total = current_total + launch_interval_nano;
-            print_process_table(table, verbose_mode);
+            print_process_table(table);
         }
 
         // non blocking message receive 
@@ -464,11 +517,12 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // call print_process_table every half-second of simulated time
+        // call tables every half-second of simulated time
         {
             long long current_total = (long long)(*sec) * NSEC_PER_SEC + (long long)(*nano);
-            while (current_total >= next_print_total) {
-                print_process_table(table, verbose_mode);
+            if (current_total >= next_print_total) {
+                print_process_table(table);
+                print_page_tables(table);
                 next_print_total += PRINT_INTERVAL_NANO;
             }
         }

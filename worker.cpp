@@ -24,7 +24,7 @@ random_device rd;
 mt19937 gen(rd());
 
 int get_memory_location(){
-    uniform_int_distribution<> page(0, 16);
+    uniform_int_distribution<> page(0, 15);
     uniform_int_distribution<> offset(0, 1023);
 
     int page_number = page(gen);
