@@ -43,7 +43,8 @@ int shmid = shmget(sh_key, sizeof(int)*2, IPC_CREAT | 0666);
 int *shm_clock;
 int *sec;
 vector <PCB> table(MAX_PROCESSES);
-const int increment_amount = 100; // 100 nanoseconds per loop iteration
+// TODO: adjust increment amount for final submission
+const int increment_amount = 1000000; // 1000000 nanoseconds per loop iteration
 
 // setup message queue
 key_t msg_key = ftok("oss.cpp", 1);
@@ -443,7 +444,15 @@ int main(int argc, char* argv[]) {
                 running_processes--;
                 continue;
             }
-  
+            // process memory request from worker
+            {
+                ostringstream ss;
+                ss << "OSS: Received memory request from Worker " << rcvMessage.pid
+                   << " for location " << rcvMessage.memory_location
+                   << (rcvMessage.write ? " (write)" : " (read)") << endl;
+                oss_log(ss.str());
+            }
+
             // send message to worker acknowledging release
             memset(&ackMessage, 0, sizeof(ackMessage));
             ackMessage.mtype = rcvMessage.pid;
@@ -453,6 +462,7 @@ int main(int argc, char* argv[]) {
                 perror("oss msgsnd ack failed");
                 exit_handler();
             }
+        }
 
         // call print_process_table every half-second of simulated time
         {
