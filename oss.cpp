@@ -57,7 +57,7 @@ int shmid = shmget(sh_key, sizeof(int)*2, IPC_CREAT | 0666);
 int *shm_clock;
 int *sec;
 vector <PCB> table(MAX_PROCESSES);
-vector<Frame> frame_table(MAX_FRAMES);
+vector <Frame> frame_table(MAX_FRAMES);
 // TODO: adjust increment amount for final submission
 const int increment_amount = 100000; // 100000 nanoseconds per loop iteration
 
@@ -158,6 +158,7 @@ int remove_pcb(vector<PCB> &table, pid_t pid) {
             table[i].start_sec = 0;
             table[i].start_nano = 0;
             table[i].pcb_index = -1;
+            table[i].page_table.assign(TOTAL_PAGES, -1); // reset page table
             return i;
         }
     }
@@ -504,6 +505,26 @@ int main(int argc, char* argv[]) {
                    << " for location " << rcvMessage.memory_location
                    << (rcvMessage.write ? " (write)" : " (read)") << endl;
                 oss_log(ss.str());
+            }
+
+            int page_number = get_page_number(rcvMessage.memory_location);
+            int pcb_index = find_pcb_by_pid(rcvMessage.pid);
+            if (pcb_index == -1) {
+                cerr << "OSS: Received message from unknown PID " << rcvMessage.pid << endl;
+                exit_handler();
+            }
+            // check if page is in page table
+            if (table[pcb_index].page_table[page_number] == -1) {
+                // page fault
+                {
+                    ostringstream ss;
+                    ss << "OSS: Page fault for Worker " << rcvMessage.pid
+                       << " on page " << page_number << endl;
+                    oss_log(ss.str());
+                }
+                // TODO: find free frame
+            } else {
+                // TODO: page hit
             }
 
             // send message to worker acknowledging release
