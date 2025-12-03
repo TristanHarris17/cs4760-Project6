@@ -234,6 +234,37 @@ void print_page_tables(const std::vector<PCB> &table) {
     oss_log_msg(ss.str());
 }
 
+void print_frame_table(const std::vector<Frame> &frames) {
+    std::ostringstream ss;
+    using std::endl;
+    ss << std::left
+       << std::setw(6)  << "Index"
+       << std::setw(6)  << "Occ"
+       << std::setw(12) << "PID"
+       << std::setw(8)  << "Page"
+       << std::setw(8)  << "Dirty" << endl;
+    ss << std::string(6 + 6 + 12 + 8 + 8, '-') << endl;
+
+    for (size_t i = 0; i < frames.size(); ++i) {
+        const Frame &f = frames[i];
+        ss << std::left << std::setw(6) << i
+           << std::setw(6) << (f.occupied ? 1 : 0);
+        if (f.occupied) {
+            ss << std::setw(12) << f.pid
+               << std::setw(8)  << f.page_number
+               << std::setw(8)  << (f.dirty ? "Y" : "N");
+        } else {
+            ss << std::setw(12) << "-" 
+               << std::setw(8)  << "-" 
+               << std::setw(8)  << "-";
+        }
+        ss << endl;
+    }
+
+    ss << endl;
+    oss_log_msg(ss.str());
+}
+
 void signal_handler(int sig) {
     if (sig == SIGALRM || sig == SIGINT) {
         cout << "Received SIGALRM or SIGINT, terminating all child processes..." << endl;
@@ -260,6 +291,14 @@ int get_page_number(int address) {
 // helper to detect empty/blank optarg
 static inline bool optarg_blank(const char* s) {
     return (s == nullptr) || (s[0] == '\0');
+}
+
+// Return index of a free (not occupied) frame in frame_table, or -1 if none found.
+int find_free_frame(const std::vector<Frame> &frames) {
+    for (size_t i = 0; i < frames.size(); ++i) {
+        if (!frames[i].occupied) return static_cast<int>(i);
+    }
+    return -1;
 }
 
 int main(int argc, char* argv[]) {
@@ -507,7 +546,7 @@ int main(int argc, char* argv[]) {
                 oss_log(ss.str());
             }
 
-            int page_number = get_page_number(rcvMessage.memory_location);
+            int page_number = get_page_number(rcvMessage.memory_location); // page number requested
             int pcb_index = find_pcb_by_pid(rcvMessage.pid);
             if (pcb_index == -1) {
                 cerr << "OSS: Received message from unknown PID " << rcvMessage.pid << endl;
@@ -522,9 +561,39 @@ int main(int argc, char* argv[]) {
                        << " on page " << page_number << endl;
                     oss_log(ss.str());
                 }
-                // TODO: find free frame
+                // try to find a free frame
+                int free_frame_index = find_free_frame(frame_table);
+                if (free_frame_index == -1) {
+                    // TODO: no free frame found - implement frame replacement algorithm
+                    {
+                        ostringstream ss;
+                        ss << "OSS: No free frame available for Worker " << rcvMessage.pid
+                           << " on page " << page_number << ". (Frame replacement not implemented)" << endl;
+                        oss_log(ss.str());
+                    }
+                    // For now, just increment clock and continue
+                    increment_clock(sec, nano, 1000); // increment clock by 1000 ns for page fault handling
+                } else {
+                    // free frame found - load page into free frame
+                    frame_table[free_frame_index].occupied = true;
+                    frame_table[free_frame_index].pid = rcvMessage.pid;
+                    frame_table[free_frame_index].page_number = page_number;
+                    frame_table[free_frame_index].dirty = rcvMessage.write;
+                    table[pcb_index].page_table[page_number] = free_frame_index;
+                }
             } else {
-                // TODO: page hit
+                {
+                    ostringstream ss;
+                    ss << "OSS: Page hit for Worker " << rcvMessage.pid
+                       << " on page " << page_number << endl;
+                    oss_log(ss.str());
+                }
+                int frame_index = table[pcb_index].page_table[page_number];
+                // mark frame as dirty if write request
+                if (rcvMessage.write) {
+                    frame_table[frame_index].dirty = true;
+                }
+                increment_clock(sec, nano, 100); // increment clock by 100 ns for page hit
             }
 
             // send message to worker acknowledging release
@@ -544,6 +613,7 @@ int main(int argc, char* argv[]) {
             if (current_total >= next_print_total) {
                 print_process_table(table);
                 print_page_tables(table);
+                print_frame_table(frame_table);
                 next_print_total += PRINT_INTERVAL_NANO;
             }
         }
