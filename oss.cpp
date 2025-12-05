@@ -50,6 +50,14 @@ struct Frame {
     bool dirty;
 };
 
+struct IOQueueEntry {
+    pid_t pid;
+    int memory_location;
+    bool write;
+    long long unblock_time;
+    int victim_frame_index;
+};
+
 // Globals
 key_t sh_key = ftok("oss.cpp", 0);
 int MAX_PROCESSES = 18;
@@ -58,8 +66,10 @@ int *shm_clock;
 int *sec;
 vector <PCB> table(MAX_PROCESSES);
 vector <Frame> frame_table(MAX_FRAMES);
+deque <int> frame_queue; // for FIFO frame replacement
+deque <IOQueueEntry> IO_queue; // processes waiting for dirty bit writes
 // TODO: adjust increment amount for final submission
-const int increment_amount = 100000; // 100000 nanoseconds per loop iteration
+const int increment_amount = 1000000; // 100000 nanoseconds per loop iteration
 
 // setup message queue
 key_t msg_key = ftok("oss.cpp", 1);
@@ -265,6 +275,23 @@ void print_frame_table(const std::vector<Frame> &frames) {
     oss_log_msg(ss.str());
 }
 
+int get_page_number(int address) {
+    return address / PAGE_SIZE;
+}
+
+void load_frame(const MessageBuffer &msg, int frame_index, int page_number) {
+    int pcb_index = find_pcb_by_pid(msg.pid);
+    if (pcb_index == -1) return; // invalid PID
+
+    frame_table[frame_index].occupied = true;
+    frame_table[frame_index].pid = msg.pid;
+    frame_table[frame_index].page_number = page_number;
+    frame_table[frame_index].dirty = msg.write;
+
+    table[pcb_index].page_table[page_number] = frame_index;
+    frame_queue.push_back(frame_index); // add frame to FIFO queue
+}
+
 void signal_handler(int sig) {
     if (sig == SIGALRM || sig == SIGINT) {
         cout << "Received SIGALRM or SIGINT, terminating all child processes..." << endl;
@@ -282,10 +309,6 @@ void exit_handler() {
     shmctl(shmid, IPC_RMID, nullptr);
     msgctl(msgid, IPC_RMID, nullptr);
     exit(1);
-}
-
-int get_page_number(int address) {
-    return address / PAGE_SIZE;
 }
 
 // helper to detect empty/blank optarg
@@ -473,6 +496,10 @@ int main(int argc, char* argv[]) {
 
     int launched_processes = 0;
     int running_processes = 0;
+    int total_requests = 0;
+    int total_page_faults = 0;
+    int total_writes = 0;
+    int total_reads = 0;
 
     long long launch_interval_nano = (long long)(launch_interval * 1e9); // convert launch interval to nanoseconds
     long long next_launch_total = 0; 
@@ -511,6 +538,66 @@ int main(int argc, char* argv[]) {
             print_process_table(table);
         }
 
+        // process IO queue for blocked processes
+        while (!IO_queue.empty()) {
+            IOQueueEntry &entry = IO_queue.front();
+            long long current_total = (long long)(*sec) * NSEC_PER_SEC + (long long)(*nano);
+            if (current_total >= entry.unblock_time) {
+                // unblock process and load page into victim frame
+                int pcb_index = find_pcb_by_pid(entry.pid);
+                if (pcb_index == -1) {
+                    cerr << "OSS: IO queue entry for unknown PID " << entry.pid << endl;
+                    exit_handler();
+                }
+                // update page table for victim process
+                pid_t victim_pid = frame_table[entry.victim_frame_index].pid;
+                int victim_page = frame_table[entry.victim_frame_index].page_number;
+                int victim_pcb_index = find_pcb_by_pid(victim_pid);
+                if (victim_pcb_index != -1) {
+                    table[victim_pcb_index].page_table[victim_page] = -1; // mark page as not present
+                }
+                
+                int page_number = get_page_number(entry.memory_location);
+                load_frame(MessageBuffer{0, entry.pid, 1, entry.memory_location, entry.write}, entry.victim_frame_index, page_number);
+                {
+                    ostringstream ss;
+                    ss << "OSS: Unblocked Worker " << entry.pid << ". Loaded page "
+                       << page_number << " into frame " << entry.victim_frame_index << endl;
+                    oss_log(ss.str());
+                }
+                // send message to worker acknowledging page loaded into frame
+                memset(&ackMessage, 0, sizeof(ackMessage));
+                ackMessage.mtype = entry.pid;
+                ackMessage.process_running = 1;
+                size_t ack_size = sizeof(MessageBuffer) - sizeof(long);
+                if (msgsnd(msgid, &ackMessage, ack_size, 0) == -1) {
+                    perror("oss msgsnd ack failed");
+                    exit_handler();
+                }
+                increment_clock(sec, nano, 100); // increment clock by 100 ns for page load
+                IO_queue.pop_front(); // remove from IO queue
+            } else {
+                break; // front of queue not ready yet
+            }
+        }
+
+        // check if all running process are blocked
+        if (running_processes > 0 && running_processes == (int)IO_queue.size()) {
+            IOQueueEntry &entry = IO_queue.front();
+            long long current_total = (long long)(*sec) * NSEC_PER_SEC + (long long)(*nano);
+            // fast forward clock to when the next process unblocks
+            if (current_total < entry.unblock_time) {
+                long long diff = entry.unblock_time - current_total;
+                increment_clock(sec, nano, diff);
+                {
+                    ostringstream ss;
+                    ss << "OSS: All processes blocked. Fast forwarding clock by " << diff << " ns." << endl;
+                    oss_log(ss.str());
+                }
+            }
+            continue; // skip message processing this loop
+        }
+
         // non blocking message receive 
         ssize_t msg_size = sizeof(MessageBuffer) - sizeof(long);
         ssize_t ret = msgrcv(msgid, &rcvMessage, msg_size, getpid(), IPC_NOWAIT);
@@ -530,6 +617,21 @@ int main(int argc, char* argv[]) {
                     oss_log(ss.str());
                 }
                 int pcb_index = find_pcb_by_pid(rcvMessage.pid);
+                // remove the processes pages from frame table
+                for (int page = 0; page < TOTAL_PAGES; ++page) {
+                    int frame_index = table[pcb_index].page_table[page];
+                    if (frame_index != -1) {
+                        frame_table[frame_index].occupied = false;
+                        frame_table[frame_index].pid = -1;
+                        frame_table[frame_index].page_number = -1;
+                        frame_table[frame_index].dirty = false;
+                        // also remove from frame queue
+                        auto it = find(frame_queue.begin(), frame_queue.end(), frame_index);
+                        if (it != frame_queue.end()) {
+                            frame_queue.erase(it);
+                        }
+                    }
+                }
                 if (pcb_index != -1) {
                     // clean PCB entry
                     remove_pcb(table, rcvMessage.pid);
@@ -545,6 +647,9 @@ int main(int argc, char* argv[]) {
                    << (rcvMessage.write ? " (write)" : " (read)") << endl;
                 oss_log(ss.str());
             }
+            total_requests++;
+            if (rcvMessage.write) total_writes++;
+            else total_reads++;
 
             int page_number = get_page_number(rcvMessage.memory_location); // page number requested
             int pcb_index = find_pcb_by_pid(rcvMessage.pid);
@@ -553,35 +658,61 @@ int main(int argc, char* argv[]) {
                 exit_handler();
             }
             // check if page is in page table
-            if (table[pcb_index].page_table[page_number] == -1) {
-                // page fault
-                {
-                    ostringstream ss;
-                    ss << "OSS: Page fault for Worker " << rcvMessage.pid
-                       << " on page " << page_number << endl;
-                    oss_log(ss.str());
-                }
-                // try to find a free frame
+            if (table[pcb_index].page_table[page_number] == -1) { // page not in page table
                 int free_frame_index = find_free_frame(frame_table);
                 if (free_frame_index == -1) {
-                    // TODO: no free frame found - implement frame replacement algorithm
+                    // no free frame found block for page replacement
+                    total_page_faults++;
+                    int frame_to_replace = frame_queue.front(); // get frame to replace using FIFO
+                    frame_queue.pop_front();
+                    IOQueueEntry entry;
+                    entry.pid = rcvMessage.pid;
+                    entry.memory_location = rcvMessage.memory_location;
+                    entry.write = rcvMessage.write;
+                    entry.victim_frame_index = frame_to_replace;
+                    if(frame_table[frame_to_replace].dirty) {
+                        // dirty frame block for extra time
+                        entry.unblock_time = (long long)(*sec) * NSEC_PER_SEC + (long long)(*nano) + 20000000LL; // unblock after 20 ms
+                        IO_queue.push_back(entry);
+                        {
+                            ostringstream ss;
+                            ss << "OSS: No free frame for Worker " << rcvMessage.pid << ". Frame "
+                               << frame_to_replace << " is dirty. Blocking for write." << endl;
+                            oss_log(ss.str());
+                        }
+                    } else {
+                        // clean frame, block for 14 ms
+                        entry.unblock_time = (long long)(*sec) * NSEC_PER_SEC + (long long)(*nano) + 14000000LL; // unblock after 14 ms
+                        IO_queue.push_back(entry);
+                        {
+                            ostringstream ss;
+                            ss << "OSS: No free frame for Worker " << rcvMessage.pid << ". Frame "
+                               << frame_to_replace << " is clean. Blocking for page load." << endl;
+                            oss_log(ss.str());
+                        }
+                    }
+                } else {
+                    // free frame found, load page into frame
+                    load_frame(rcvMessage, free_frame_index, page_number);
                     {
                         ostringstream ss;
-                        ss << "OSS: No free frame available for Worker " << rcvMessage.pid
-                           << " on page " << page_number << ". (Frame replacement not implemented)" << endl;
+                        ss << "OSS: Worker " << rcvMessage.pid << " Page " << page_number
+                           << ". Loaded into free frame " << free_frame_index << endl;
                         oss_log(ss.str());
                     }
-                    // For now, just increment clock and continue
-                    increment_clock(sec, nano, 1000); // increment clock by 1000 ns for page fault handling
-                } else {
-                    // free frame found - load page into free frame
-                    frame_table[free_frame_index].occupied = true;
-                    frame_table[free_frame_index].pid = rcvMessage.pid;
-                    frame_table[free_frame_index].page_number = page_number;
-                    frame_table[free_frame_index].dirty = rcvMessage.write;
-                    table[pcb_index].page_table[page_number] = free_frame_index;
+                    // send message to worker acknowledging page loaded into frame
+                    memset(&ackMessage, 0, sizeof(ackMessage));
+                    ackMessage.mtype = rcvMessage.pid;
+                    ackMessage.process_running = 1;
+                    size_t ack_size = sizeof(MessageBuffer) - sizeof(long);
+                    if (msgsnd(msgid, &ackMessage, ack_size, 0) == -1) {
+                        perror("oss msgsnd ack failed");
+                        exit_handler();
+                    }
+                    increment_clock(sec, nano, 100); // increment clock by 100 ns for page load
                 }
             } else {
+                // page hit
                 {
                     ostringstream ss;
                     ss << "OSS: Page hit for Worker " << rcvMessage.pid
@@ -594,16 +725,16 @@ int main(int argc, char* argv[]) {
                     frame_table[frame_index].dirty = true;
                 }
                 increment_clock(sec, nano, 100); // increment clock by 100 ns for page hit
-            }
-
-            // send message to worker acknowledging release
-            memset(&ackMessage, 0, sizeof(ackMessage));
-            ackMessage.mtype = rcvMessage.pid;
-            ackMessage.process_running = 1;
-            size_t ack_size = sizeof(MessageBuffer) - sizeof(long);
-            if (msgsnd(msgid, &ackMessage, ack_size, 0) == -1) {
-                perror("oss msgsnd ack failed");
-                exit_handler();
+                
+                // send message to worker acknowledging release on page hit
+                memset(&ackMessage, 0, sizeof(ackMessage));
+                ackMessage.mtype = rcvMessage.pid;
+                ackMessage.process_running = 1;
+                size_t ack_size = sizeof(MessageBuffer) - sizeof(long);
+                if (msgsnd(msgid, &ackMessage, ack_size, 0) == -1) {
+                    perror("oss msgsnd ack failed");
+                    exit_handler();
+                }
             }
         }
 
@@ -617,6 +748,24 @@ int main(int argc, char* argv[]) {
                 next_print_total += PRINT_INTERVAL_NANO;
             }
         }
+    }
+
+    // final stats
+    {
+        ostringstream ss;
+        ss << "OSS: All worker processes have terminated." << endl
+           << "Total memory requests: " << total_requests << endl
+           << "Total page faults: " << total_page_faults << endl
+           << "Total read requests: " << total_reads << endl
+           << "Total write requests: " << total_writes << endl
+           << "Percentage of page faults: ";
+        if (total_requests > 0) {
+            double fault_percentage = (double)total_page_faults / (double)total_requests * 100.0;
+            ss << fixed << setprecision(2) << fault_percentage << "%" << endl;
+        } else {
+            ss << "N/A (no requests)" << endl;
+        }
+        oss_log(ss.str());
     }
 
     // cleanup
