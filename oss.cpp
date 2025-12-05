@@ -491,7 +491,7 @@ int main(int argc, char* argv[]) {
            << "-s: " << simul << endl
            << "-t: " << time_limit << endl
            << "-i: " << launch_interval << endl;
-        oss_log(ss.str());
+        oss_log_msg(ss.str());
     }
 
     int launched_processes = 0;
@@ -558,12 +558,16 @@ int main(int argc, char* argv[]) {
                 }
                 
                 int page_number = get_page_number(entry.memory_location);
+                frame_table[entry.victim_frame_index].occupied = false;
+                frame_table[entry.victim_frame_index].pid = -1;
+                frame_table[entry.victim_frame_index].page_number = -1;
+                frame_table[entry.victim_frame_index].dirty = false;
                 load_frame(MessageBuffer{0, entry.pid, 1, entry.memory_location, entry.write}, entry.victim_frame_index, page_number);
                 {
                     ostringstream ss;
                     ss << "OSS: Unblocked Worker " << entry.pid << ". Loaded page "
                        << page_number << " into frame " << entry.victim_frame_index << endl;
-                    oss_log(ss.str());
+                    oss_log_msg(ss.str());
                 }
                 // send message to worker acknowledging page loaded into frame
                 memset(&ackMessage, 0, sizeof(ackMessage));
@@ -592,7 +596,7 @@ int main(int argc, char* argv[]) {
                 {
                     ostringstream ss;
                     ss << "OSS: All processes blocked. Fast forwarding clock by " << diff << " ns." << endl;
-                    oss_log(ss.str());
+                    oss_log_msg(ss.str());
                 }
             }
             continue; // skip message processing this loop
@@ -645,7 +649,7 @@ int main(int argc, char* argv[]) {
                 ss << "OSS: Received memory request from Worker " << rcvMessage.pid
                    << " for location " << rcvMessage.memory_location
                    << (rcvMessage.write ? " (write)" : " (read)") << endl;
-                oss_log(ss.str());
+                oss_log_msg(ss.str());
             }
             total_requests++;
             if (rcvMessage.write) total_writes++;
@@ -678,7 +682,7 @@ int main(int argc, char* argv[]) {
                             ostringstream ss;
                             ss << "OSS: No free frame for Worker " << rcvMessage.pid << ". Frame "
                                << frame_to_replace << " is dirty. Blocking for write." << endl;
-                            oss_log(ss.str());
+                            oss_log_msg(ss.str());
                         }
                     } else {
                         // clean frame, block for 14 ms
@@ -688,7 +692,7 @@ int main(int argc, char* argv[]) {
                             ostringstream ss;
                             ss << "OSS: No free frame for Worker " << rcvMessage.pid << ". Frame "
                                << frame_to_replace << " is clean. Blocking for page load." << endl;
-                            oss_log(ss.str());
+                            oss_log_msg(ss.str());
                         }
                     }
                 } else {
@@ -698,7 +702,7 @@ int main(int argc, char* argv[]) {
                         ostringstream ss;
                         ss << "OSS: Worker " << rcvMessage.pid << " Page " << page_number
                            << ". Loaded into free frame " << free_frame_index << endl;
-                        oss_log(ss.str());
+                        oss_log_msg(ss.str());
                     }
                     // send message to worker acknowledging page loaded into frame
                     memset(&ackMessage, 0, sizeof(ackMessage));
@@ -717,7 +721,7 @@ int main(int argc, char* argv[]) {
                     ostringstream ss;
                     ss << "OSS: Page hit for Worker " << rcvMessage.pid
                        << " on page " << page_number << endl;
-                    oss_log(ss.str());
+                    oss_log_msg(ss.str());
                 }
                 int frame_index = table[pcb_index].page_table[page_number];
                 // mark frame as dirty if write request
@@ -765,7 +769,7 @@ int main(int argc, char* argv[]) {
         } else {
             ss << "N/A (no requests)" << endl;
         }
-        oss_log(ss.str());
+        oss_log_msg(ss.str());
     }
 
     // cleanup
