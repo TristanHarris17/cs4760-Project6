@@ -7,10 +7,23 @@ How to compile the project:
 Type 'make'
 
 Example of how to run the project:
-./oss -n 3 -s 2 -t 4 -i 0.6 -f log.txt -v
+./oss -n 3 -s 2 -t 4 -i 0.6 -f log.txt
+
+Notes: 
+I have the increment amount for every loop set to 1000000 ns or 1 ms to try to reduce the size of the log file still more than 1000 lines usually
 
 Generative AI used: ChatGPT
-Prompts:
+Prompts: 
+write a function that prints the page table of each process entry in the PCB in a formatted way similar to how the print_process_table function prints the process table
+
+write a function that prints the frame table with a similar format to how print_page_tables works
+
+what is the issue inside the PCB struct where I create the page table I want a vector of 16 ints all starting with a value of -1
 
 Summary:
+wrote the function correctly prints the table in a way I liked
+
+wrote the function correctly, same format as the others
+
+I was writing it vector<int> page_table(16, -1); didn't tell me what I was doing wrong. Gave me some other solutions but I decided to use a constructor instead.
 

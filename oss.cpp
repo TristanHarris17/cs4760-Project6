@@ -68,7 +68,6 @@ vector <PCB> table(MAX_PROCESSES);
 vector <Frame> frame_table(MAX_FRAMES);
 deque <int> frame_queue; // for FIFO frame replacement
 deque <IOQueueEntry> IO_queue; // processes waiting for dirty bit writes
-// TODO: adjust increment amount for final submission
 const int increment_amount = 1000000; // 100000 nanoseconds per loop iteration
 
 // setup message queue

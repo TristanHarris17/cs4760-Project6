@@ -93,7 +93,6 @@ int main(int argc, char* argv[]) {
 
     // message-driven loop: block until OSS tells us to check the clock
     MessageBuffer msg;
-    pid_t oss_pid = getppid();
 
     while (true) {
         // check if its time to terminate 
